@@ -3,7 +3,7 @@
 """
 Created on Wed Oct 16 09:47:46 2024
 
-@author: [authors]
+@author: MODAL
 """
 
 # %%

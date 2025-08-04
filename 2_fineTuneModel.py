@@ -3,7 +3,7 @@
 """
 Created on Fri Oct 25 11:25:08 2024
 
-@author: Fabio
+@author: MODAL
 """
 
 # %% IMPORT SECTION

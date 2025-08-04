@@ -37,10 +37,10 @@ The code is built on TensorFlow with **multi‑GPU** support and can run on loca
 This project ships with a fully‑pinned Conda environment file (environment.yml).  Key specs:
 | Requirement | Version / Notes |
 |------|----------|
-Python | 3.12.6 (CPython) |
-TensorFlow | 2.17.0 GPU build (CUDA 12.0) |
+Python | 3.12.6 |
+TensorFlow | 2.17.0 GPU build (CUDA 12.6) |
 CUDA / cuDNN | CUDA 12 Toolkit, cuDNN ≥ 8.9 |
-Core libs | tensorflow, numpy, pandas, scikit‑learn, matplotlib, seaborn, and other dependencies |
+Nvidia Drivers | 550.163.01
 
 >⚠️ A recent NVIDIA GPU (Ampere or newer) is highly recommended—the code also runs on CPU but will be considerably slower.
 

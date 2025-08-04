@@ -1,3 +1,10 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Sep 06 12:43:03 2024
+
+@author: MODAL
+"""
 # %%
 import tensorflow as tf
 

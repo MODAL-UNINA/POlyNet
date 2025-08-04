@@ -1,0 +1,1 @@
+{"labels": ["LDPE", "PE", "PP", "EH", "EO", "EB", "RACO", "EPR"], "n_ft_samples": 50000, "single_percent": 0.4, "epochs": 10000, "batch_size": 384, "validation_split": 0.3, "learning_rate": 3e-06, "reg_l2": 1e-12, "dropout_rate": 0.1, "run_name": "model_weights_kl_mse_loss_composition_neg_mse_bigbig_norm_high76ldpev3"}

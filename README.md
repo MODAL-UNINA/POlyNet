@@ -1,5 +1,7 @@
 # POlyNet
 
+![Logo del progetto](images/POlyNet_logo.png)
+
 POlyNet: Transformer-based deep learning framework for ultra-fast, automated, and interpretable analysis of polyolefin multimaterials from <sup>13</sup>C NMR spectra, enabling accurate identification, quantification, and characterization for polymer recycling applications.
 
 ## Overview

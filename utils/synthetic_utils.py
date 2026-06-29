@@ -1,26 +1,48 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Created on Fri Sep 06 12:43:03 2024
+"""Utilities for synthetic DeepNMR dataset generation.
 
-@author: MODAL
+This module contains the low-level routines used by ``0_synthDataGen.py`` to
+build synthetic NMR spectra from fingerprint-envelope interpolation functions.
+
+The current generation pipeline uses:
+
+  - ``generate_synthetic_params`` to build valid weight/composition grids;
+  - ``create_mixture`` to sample those grids and generate spectra in parallel;
+  - ``create_single_mixture`` to build one synthetic spectrum, including
+    mixture superposition, peak copy/removal, chain-end signals, safe spectral
+    augmentation, baseline distortion, noise, masking, shift, and final
+    area-normalization.
+
+Several older augmentation helpers are kept in the file for backward
+compatibility, but are explicitly marked as legacy. They are not called by the
+current dataset-generation path.
+
+Important
+---------
+This file is scientifically sensitive: numerical constants, probabilities,
+normalization steps, random branches, and operation order should not be changed
+unless the synthetic dataset generation protocol is intentionally revised.
 """
 
 # %% IMPORT SECTION
-import math
-import time
-import random
-import logging
 import itertools
-import numpy as np
-from math import comb
-from tqdm import trange
-from joblib import Parallel, delayed
-from scipy.special import voigt_profile
-from scipy.integrate import simpson as simps
-from scipy.signal import find_peaks, peak_prominences
+import logging
+import math
+import random
+import time
 
-#%% AUGMENTATION PROCEDURES
+import numpy as np
+from joblib import Parallel, delayed
+from scipy.integrate import simpson as simps
+from scipy.interpolate import interp1d
+from scipy.signal import find_peaks, peak_prominences, peak_widths
+from scipy.special import voigt_profile
+from tqdm import trange
+
+
+# %% LEGACY AUGMENTATION FUNCTIONS - NOT USED BY CURRENT GENERATION PATH
+
 
 def compress_expand_spectrum(intensities, factor):
     """
@@ -168,7 +190,7 @@ def modify_intensities_and_positions(spectrum, factor=0.1, shift=10):
         # Compute the area under the current peak
         integral = simps(intensities[left_bases[i] : right_bases[i]])
 
-        if integral < 1e-1*max_area:
+        if integral < 1e-1 * max_area:
 
             # Introduce random fluctuation to the peak's intensity
             j = np.random.uniform(1.0 - factor, 1.0 + factor) * max_area / integral
@@ -194,6 +216,9 @@ def modify_intensities_and_positions(spectrum, factor=0.1, shift=10):
             intensities[left_bases[i] + s : right_bases[i] + s] = mod_peak
 
     return intensities
+
+
+# %% CURRENT PEAK AND SPECTRAL AUGMENTATION HELPERS
 
 def remove_and_copy_peaks(
     intensities,
@@ -333,12 +358,9 @@ def remove_and_copy_peaks(
 
     return modified_intensities
 
+
 def chain_ends_addition(
-    spectrum, 
-    ppm_domain_general, 
-    column_labels, 
-    w_mixture, 
-    probability_threshold=0.5
+    spectrum, ppm_domain_general, column_labels, w_mixture, probability_threshold=0.5
 ):
     """
     Augments the input NMR spectrum by probabilistically adding synthetic chain-end signals
@@ -364,26 +386,38 @@ def chain_ends_addition(
     chainends_spectrum_general = np.zeros_like(spectrum)
     for copo, w in zip(column_labels, w_mixture):
         # Chain ends are added only for LLDPE copolymers
-        if w > 0 and copo not in ["LDPE", "PE", "PP", "RACO", "PP_RACO"]: 
+        if w > 0 and copo not in ["LDPE", "PE", "PP", "RACO", "PP_RACO"]:
             chainends_spectrum = np.zeros_like(spectrum)
-            intensity = np.random.uniform(2e-3, 5e-5)
+            # intensity = np.random.uniform(2e-3, 1e-5)
+            intensity = np.random.uniform(1e-5, 3e-3)
             # Add chain end peaks only with a certain probability to augment the diversity of the dataset
             # if np.random.rand() > probability_threshold:
             if copo in ["EH", "EO"]:
                 for p in pos:
                     if np.random.rand() > probability_threshold:
-                        chainends_spectrum += intensity * voigt_profile(domain - p, 1, 1)
+                        chainends_spectrum += np.random.uniform(0.8, 1.2) * intensity * voigt_profile(
+                            domain - p,
+                            np.random.uniform(0.9, 1.1),
+                            np.random.uniform(0.9, 1.1),
+                        )
                 chainends_spectrum_general += w * chainends_spectrum
             elif copo in ["EB", "EPR"]:
                 for p in pos:
-                    chainends_spectrum += intensity * voigt_profile(domain - p, 1, 1)
+                    chainends_spectrum += np.random.uniform(0.8, 1.2) * intensity * voigt_profile(
+                        domain - p,
+                        np.random.uniform(0.9, 1.1),
+                        np.random.uniform(0.9, 1.1),
+                    )
                 chainends_spectrum_general += w * chainends_spectrum
 
     spectrum += chainends_spectrum_general
 
     return spectrum
 
-def augment(spectrum, modify_peaks=True):
+
+# %% LEGACY COMPOSITE AUGMENTATION WRAPPER - NOT USED BY CURRENT GENERATION PATH
+
+def augment(spectrum, compress=True, modify_peaks=True):
     """
     Augments a spectrum by applying compression/expansion, alignment, and intensity/position modifications.
 
@@ -395,41 +429,138 @@ def augment(spectrum, modify_peaks=True):
 
     Parameters:
         spectrum (array-like): The original spectrum to be augmented.
+        compress (bool): Whether to apply compression/expansion.
+        modify_peaks (bool): Whether to modify peak intensities and positions.
 
     Returns:
         numpy.ndarray: The augmented spectrum.
     """
     # Step 1: Randomly compress or expand the spectrum slightly
-    compression_factor = np.random.uniform(0.98, 1.02)  # Random factor near 1
-    if compression_factor == 1:  # Avoid division by zero or no change
-        compression_factor += 1e-6
+    # compression_factor = np.random.uniform(0.98, 1.02)  # Random factor near 1
+    if compress:
+        epsilon = 1e-1
+        compression_factor = np.random.uniform(
+            1 - epsilon, 1 + epsilon
+        )  # Random factor near 1
+        if compression_factor != 1:  # Avoid division by zero or no change
+            modified_spectrum = compress_expand_spectrum(
+                spectrum.copy(), compression_factor
+            )
+        else:
+            modified_spectrum = spectrum.copy()
 
-    modified_spectrum = compress_expand_spectrum(spectrum.copy(), compression_factor)
+        # Step 2: Match the length of the modified spectrum to the original spectrum
+        delta = np.abs(len(modified_spectrum) - len(spectrum))  # Length difference
 
-    # Step 2: Match the length of the modified spectrum to the original spectrum
-    delta = np.abs(len(modified_spectrum) - len(spectrum))  # Length difference
+        if len(modified_spectrum) < len(spectrum):
+            # Extend the spectrum by repeating the last few elements
+            modified_spectrum = np.concatenate(
+                [modified_spectrum, modified_spectrum[-delta:]]
+            )
+        else:
+            # Trim the spectrum to match the original length
+            modified_spectrum = modified_spectrum[: len(spectrum)]
 
-    if len(modified_spectrum) < len(spectrum):
-        # Extend the spectrum by repeating the last few elements
-        modified_spectrum = np.concatenate(
-            [modified_spectrum, modified_spectrum[-delta:]]
-        )
+        # Step 3: Align the main peak of the modified spectrum with the original spectrum
+        aligned_spectrum = align_main_peaks(spectrum.copy(), modified_spectrum.copy())
     else:
-        # Trim the spectrum to match the original length
-        modified_spectrum = modified_spectrum[: len(spectrum)]
-
-    # Step 3: Align the main peak of the modified spectrum with the original spectrum
-    aligned_spectrum = align_main_peaks(spectrum.copy(), modified_spectrum.copy())
+        aligned_spectrum = spectrum.copy()
 
     # Step 4: Modify intensities and positions of the peaks
     if modify_peaks:
         augmented_spectrum = modify_intensities_and_positions(
-            aligned_spectrum.copy(), factor=0.05, shift=10
+            aligned_spectrum.copy(), factor=0.025, shift=5
         )
+    else:
+        augmented_spectrum = aligned_spectrum
 
     return augmented_spectrum
 
+
+# %% CURRENT SAFE AUGMENTATION PROCEDURE
+
+def augment_spectrum_safe(spectrum, compress=True, modify_peaks=True, seed=None):
+    y = np.asarray(spectrum, dtype=float).copy()
+    n = len(y)
+    x = np.arange(n, dtype=float)
+
+    rng = np.random.default_rng(seed)
+
+    # ----------------------------
+    # STEP 1: Warp around anchor
+    # ----------------------------
+    if compress:
+        eps = 0.005  # 0.5%
+        factor = rng.uniform(1 - eps, 1 + eps)
+
+        if abs(factor - 1.0) > 1e-9:
+            search_start, search_end = 13000, 16000
+            region = y[search_start:search_end]
+            if region.size > 0 and np.max(region) > 0:
+                anchor = search_start + int(np.argmax(region))
+            else:
+                anchor = n // 2
+
+            xq = anchor + (x - anchor) * factor
+
+            # edge-hold, no zeros
+            f = interp1d(
+                x, y, kind="linear", bounds_error=False, fill_value=(y[0], y[-1])
+            )
+            y_warp = f(xq)
+
+            # # preserve L2
+            # a = np.sqrt(np.mean(y**2)) + 1e-12
+            # b = np.sqrt(np.mean(y_warp**2)) + 1e-12
+            # y = y_warp * (a / b)
+
+            # preserve L1
+            a = simps(y) + 1e-12
+            b = simps(y_warp) + 1e-12
+            y = y_warp * (a / b)
+
+    # ----------------------------
+    # STEP 2: Smooth peak scaling
+    # ----------------------------
+    if modify_peaks:
+        noise_region = np.concatenate([y[:2500], y[-2500:]])
+        noise_mean = np.mean(noise_region)
+        noise_std = np.std(noise_region)
+        thr = noise_mean + 6 * noise_std
+        pks, props = find_peaks(y, height=thr)
+
+        if pks.size > 0:
+            max_pk = np.max(y[pks])
+            mult = np.ones(n, dtype=float)
+
+            # width estimate (at half prominence)
+            widths, _, left_ips, right_ips = peak_widths(y, pks, rel_height=0.5)
+
+            for i, pk in enumerate(pks):
+                h = y[pk]
+                if h < 0.1 * max_pk:
+                    # define window around peak, clamp size
+                    w = int(np.clip(widths[i] * 3.0, 5, 200))
+                    lb = max(0, pk - w)
+                    rb = min(n, pk + w + 1)
+
+                    scale = rng.uniform(0.85, 1.15)
+
+                    win = rb - lb
+                    bell = np.hanning(win)
+                    modifier = 1.0 + (scale - 1.0) * bell
+
+                    # combine but keep bounded
+                    mult[lb:rb] *= modifier
+
+            mult = np.clip(mult, 0.7, 1.3)
+            y *= mult
+
+    return y
+
+
 # %% GENERATION OF PARAMETERS FOR SYNTHETIC SPECTRA
+
 
 def find_weight_combinations(N, step=0.1, precision=2, weight_bounds=(0.1, 0.9)):
     """
@@ -523,11 +654,7 @@ def generate_synthetic_params(
         weight_bounds=weight_bounds,
     )
 
-    # Print theoretical number of weight combinations
-    theoretical_count = comb(
-        int(1 / weight_step) + len(copolymer_list) - 1, len(copolymer_list) - 1
-    )
-    print(f"len(weights): {len(weights)} over theoretical {theoretical_count}")
+    print(f"Computed weights combinations: {len(weights)}")
 
     # Step 3: Apply max_components filter if needed
     print(f"Masking weights with max_components={max_components}...", end=" ")
@@ -541,10 +668,59 @@ def generate_synthetic_params(
 
     return weights, compositions_mix
 
+
+def add_curved_baseline(spectrum, max_amplitude=0.005, complexity=3):
+    """
+    Adds a random curved baseline distortion to a spectrum by summing low-frequency sine waves.
+
+    Parameters:
+        spectrum (np.ndarray): Input spectrum.
+        max_amplitude (float): Maximum distortion amplitude relative to the maximum spectrum intensity.
+        complexity (int): Number of sine waves to sum.
+
+    Returns:
+        np.ndarray: Spectrum with added curved baseline.
+    """
+    max_abs_amplitude = np.max(spectrum) * max_amplitude
+    x = np.linspace(0, 1, len(spectrum))
+    baseline_distortion = np.zeros_like(spectrum)
+
+    for _ in range(complexity):
+        amplitude = np.random.uniform(
+            -max_abs_amplitude / complexity, max_abs_amplitude / complexity
+        )
+        frequency = np.random.uniform(0.5, 2.0)
+        phase = np.random.uniform(0, 2 * np.pi)
+
+        baseline_distortion += amplitude * np.sin(2 * np.pi * frequency * x + phase)
+
+    assert len(baseline_distortion) == len(spectrum), "Baseline length mismatch"
+    return baseline_distortion
+
+
 # %% MIXTURE CREATION PROCEDURES
 
+def safe_area_normalize(spectrum, eps=1e-12, clip_min=1e-16):
+    """Clip and area-normalize a spectrum using Simpson integration."""
+    spectrum = np.asarray(spectrum, dtype=float).reshape(-1)
+    spectrum = np.maximum(spectrum, clip_min)
+
+    area = simps(spectrum)
+
+    if not np.isfinite(area) or np.abs(area) < eps:
+        raise ValueError(f"Invalid spectrum area during normalization: {area}")
+
+    return spectrum / area
+
 def create_single_mixture(
-    i, df_w_values, df_c_values, column_labels, interp_dict, ppm_domain_general
+    i,
+    df_w_values,
+    df_c_values,
+    column_labels,
+    interp_dict,
+    ppm_domain_general,
+    noise_pool=None,
+    chem_data=False,
 ):
     try:
         # Extract weight and concentration values for mixture
@@ -557,35 +733,55 @@ def create_single_mixture(
         spectrum_components = []
 
         for k in list_nonzero_w:
+            label = column_labels[k]
             # If the component is not an homopolymer, we use the fingerprint on
             # randomly generated weight and concentration values
             if column_labels[k] not in ["LDPE", "PE", "PP"]:
-                spectrum_components.append(
-                    np.asarray(
-                        interp_dict[column_labels[k]](
+                # spectrum_components.append(
+                #     np.asarray(
+                #         interp_dict[column_labels[k]](
+                #             np.arange(len(ppm_domain_general)),
+                #             c_mixture[k],
+                #         ).T[0]
+                #     )
+                #     * w_mixture[k]
+                # )
+                component = np.asarray(
+                        interp_dict[label](
                             np.arange(len(ppm_domain_general)),
                             c_mixture[k],
                         ).T[0]
-                    )
-                    * w_mixture[k]
-                )
+                    ).reshape(-1)
             # If the component is PP or HDPE we use the fingerprint on
             # randomly generated weight values
             elif column_labels[k] in ["PE", "PP"]:
-                spectrum_components.append(
-                    interp_dict[column_labels[k]](np.arange(len(ppm_domain_general))).T
-                    * w_mixture[k]
-                )
-            # If the component is LDPE, we use a random choice between the extracted fingerprints
-            elif column_labels[k] == "LDPE":
-                spectrum_components.append(
-                    random.choice(interp_dict[column_labels[k]])(
+                # spectrum_components.append(
+                #     interp_dict[column_labels[k]](np.arange(len(ppm_domain_general))).T
+                #     * w_mixture[k]
+                # )
+                component = np.asarray(
+                    interp_dict[label](
                         np.arange(len(ppm_domain_general))
                     ).T
-                    * w_mixture[k]
-                )
+                ).reshape(-1)
+            # If the component is LDPE, we use a random choice between the extracted fingerprints
+            elif column_labels[k] in ["LDPE"]:
+                # spectrum_components.append(
+                #     random.choice(interp_dict[column_labels[k]])(
+                #         np.arange(len(ppm_domain_general))
+                #     ).T
+                #     * w_mixture[k]
+                # )
+                component = np.asarray(
+                    random.choice(interp_dict[label])(
+                        np.arange(len(ppm_domain_general))
+                    ).T
+                ).reshape(-1)
             else:
                 raise ValueError(f"Unknown component: {column_labels[k]}")
+
+            # component = safe_area_normalize(component, clip_min=1e-16)
+            spectrum_components.append(component * w_mixture[k])
 
         # Ensure all spectral components are nonzero
         for idx, spectrum_component in enumerate(spectrum_components):
@@ -594,50 +790,119 @@ def create_single_mixture(
         # Generate the synthetic spectrum by summing the components
         spectrum = np.sum(spectrum_components, axis=0)
         assert np.any(spectrum != 0), "Null spectrum generated from components."
+        spectrum = safe_area_normalize(spectrum, clip_min=1e-16)
+        assert np.isclose(simps(spectrum), 1), f"Generated spectrum is not area-normalized: area={simps(spectrum)}"
+
+        # spectrum = safe_area_normalize(spectrum, clip_min=1e-16)
 
         # Random copying/removal of peaks
-        spectrum = remove_and_copy_peaks(
-            spectrum.copy(),
-            max_peaks_to_remove=0,
-            max_peaks_to_copy=2,
-            inclusion_threshold=1e-3,
-            random_scaling=(0.20, 0.50),
-            wlen=50,
-        )
+        if np.random.rand() < 0.75:
+            spectrum = remove_and_copy_peaks(
+                spectrum.copy(),
+                max_peaks_to_remove=0,
+                max_peaks_to_copy=2,
+                inclusion_threshold=1e-3,
+                random_scaling=(0.20, 0.50),
+                wlen=50,
+            )
 
         # Random addition of chain-end signals
-        spectrum = chain_ends_addition(
-            spectrum.copy(),
-            ppm_domain_general,
-            column_labels,
-            w_mixture,
-            probability_threshold=0.3,
-        )
+        if np.random.rand() < 0.75:
+            spectrum = chain_ends_addition(
+                spectrum.copy(),
+                ppm_domain_general,
+                column_labels,
+                w_mixture,
+                probability_threshold=0.3,
+            )
 
-        # Augmentation Procedures for the spectrum
-        spectrum = augment(spectrum.copy(), modify_peaks=True)
+        #Augmentation Procedures for the spectrum
+        sigma = np.random.rand()
+        if sigma < 0.75:
+            if chem_data:
+                spectrum = augment_spectrum_safe(spectrum.copy(), compress=False, modify_peaks=True)
+            else:
+                if sigma < 0.5:
+                    spectrum = augment_spectrum_safe(spectrum.copy(), compress=False, modify_peaks=True)
+                else:
+                    spectrum = augment_spectrum_safe(spectrum.copy(), compress=True, modify_peaks=True)
+
+        if np.random.rand() < 0.5:
+            spectrum += add_curved_baseline(
+                spectrum,
+                max_amplitude=np.random.uniform(1e-6, 5e-5),
+                complexity=np.random.randint(2, 5),
+            )
 
         # Noise Addition
-        flag = True
-        while flag:
-            try:
-                mean_noise = np.random.uniform(1e-5, 5e-5)
-                std_noise = np.random.uniform(0.75e-5, 1.75e-5)
-                spectrum = spectrum + np.random.normal(
-                    mean_noise, std_noise, spectrum.shape
-                )
-                flag = False
-            except:
-                continue
+        # --- 1. NOISE DECISION LOGIC ---
+        has_noise_pool = (noise_pool is not None) and (len(noise_pool) > 0)
 
-        # Normalize Spectrum (Check for Safe Min Value)
-        spectrum -= min(spectrum)
-        spectrum = spectrum / simps(spectrum)
-        assert np.isclose(simps(spectrum), 1), "Spectrum not area-normalized"
+        apply_real_noise = (np.random.rand() < 0.5) if has_noise_pool else False
+        apply_gauss_noise = np.random.rand() < 0.5
+
+        # Force at least one noise type if both were skipped
+        if not apply_real_noise and not apply_gauss_noise:
+            if has_noise_pool:
+                if np.random.rand() < 0.5:
+                    apply_real_noise = True
+                else:
+                    apply_gauss_noise = True
+            else:
+                apply_gauss_noise = True
+
+        # --- 2. REAL NOISE APPLICATION ---
+        if apply_real_noise:
+            len_crop = 1000
+            num_segments_needed = int(np.ceil(len(spectrum) / len_crop))
+            noise_segments_list = []
+
+            # Choose source segment outside the loop to simulate a single instrument baseline
+            source_noise_segment = random.choice(noise_pool)
+
+            for _ in range(num_segments_needed):
+                if len(source_noise_segment) > len_crop:
+                    max_start_index = len(source_noise_segment) - len_crop
+                    start_index = np.random.randint(0, max_start_index + 1)
+                    noise_crop = source_noise_segment[
+                        start_index : start_index + len_crop
+                    ]
+                else:
+                    noise_crop = source_noise_segment
+                noise_segments_list.append(noise_crop)
+
+            full_length_noise = np.concatenate(noise_segments_list)[: len(spectrum)]
+            noise_scaling = np.random.uniform(0.5, 1.5)
+            scaled_noise = full_length_noise * noise_scaling
+
+            # Random circular shift to avoid recognizable patterns
+            scaled_noise = np.roll(
+                scaled_noise, np.random.randint(0, len(scaled_noise))
+            )
+
+            spectrum += scaled_noise
+
+        # --- 3. GAUSSIAN NOISE APPLICATION ---
+        if apply_gauss_noise:
+            mean_noise = 0.0
+
+            if has_noise_pool:
+                reference_noise = random.choice(noise_pool)
+                base_std = np.std(reference_noise)
+                
+                # Stochastic variation factor (e.g. +/- 20%)
+                std_noise = base_std * np.random.uniform(0.8, 1.2)
+            else:
+                # Fallback based on historical instrument data
+                std_noise = np.random.uniform(0.75e-5, 1.75e-5)
+
+            spectrum += np.random.normal(
+                loc=mean_noise, scale=std_noise, size=spectrum.shape
+            )
 
         # Random Masking Procedure
-        if np.random.rand() < 0.1:
-            win_to_erase = np.random.uniform(0.5, 1.5)  # in ppm
+        if np.random.rand() < 0.1 and not chem_data:
+            win_to_erase = np.random.uniform(0.25, 0.75)  # in ppm
             # convert in samples
             win_to_erase = int(win_to_erase / np.abs(np.diff(ppm_domain_general))[0])
             # chose a random position
@@ -654,14 +919,24 @@ def create_single_mixture(
 
         # Random Shifting Procedure
         eta = np.abs(ppm_domain_general[1] - ppm_domain_general[0])
-        if np.random.rand() < 0.25:
-            spectrum = np.roll(spectrum, np.random.randint(-0.5 // eta, 0.5 // eta))
+        if np.random.rand() < 0.5:
+            if chem_data:
+                max_shift_ppm = 0.01
+            else:
+                max_shift_ppm = 0.05
+
+            max_shift = int(round(max_shift_ppm / eta))
+            spectrum = np.roll(spectrum, np.random.randint(-max_shift, max_shift + 1))
+
+        spectrum = safe_area_normalize(spectrum, clip_min=1e-16)
+        assert np.isclose(simps(spectrum), 1, atol=1e-6), "Final spectrum not area-normalized"
 
         return spectrum
 
     except Exception as e:
-        logging.warning(f"Errore nella creazione della miscela {i}: {e}")
+        logging.warning(f"Error creating mixture {i}: {e}")
         return None
+
 
 def create_mixture(
     df_w,
@@ -671,8 +946,10 @@ def create_mixture(
     column_labels,
     interp_dict,
     ppm_domain_general,
+    noise_pool=None,
     n_mixture=10,
     n_jobs=32,
+    chem_data=False,
 ):
     """
     Creates a mixture dataset using parallel processing.
@@ -687,7 +964,7 @@ def create_mixture(
         ppm_domain_general (np.ndarray): General ppm domain for spectra.
         n_mixture (int, optional): Number of mixtures to generate. Defaults to 10.
         n_jobs (int, optional): Number of parallel jobs. Defaults to 32.
-
+        chem_data (bool, optional): Whether the data is chemical data. Defaults to False.
     Returns:
         tuple: (np.ndarray of generated mixtures, selected indices from df_c, selected indices from df_w, df_w_values, df_c_values)
     """
@@ -736,10 +1013,14 @@ def create_mixture(
             column_labels,
             interp_dict,
             ppm_domain_general,
+            noise_pool,
+            chem_data,
         )
         for i in trange(n_mixture)
     )
 
-    assert np.any([mixes is not None for mixes in mixes]), "Error in mixture creation"
+    failed = sum(m is None for m in mixes)
+    if failed > 0:
+        raise RuntimeError(f"{failed} mixtures failed during generation.")
 
     return np.array(mixes), indices_c, indices_w, df_w_values, df_c_values

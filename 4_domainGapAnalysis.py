@@ -17,16 +17,16 @@ Suffix convention
 -----------------
 Use --suffix without leading underscore, e.g.:
 
-  --suffix ftc_o2
+  --suffix ft
 
-Internally, the suffix is normalized to '_ftc_o2', producing artifact keys such as:
+Internally, the suffix is normalized to '_ft', producing artifact keys such as:
 
-  X_ftc_o2
-  y_w_ftc_o2
+  X_ft
+  y_w_ft
 
 and output folders such as:
 
-  OUTPUT/domain_gap/<train_tag>/plots_ftc_o2/
+  OUTPUT/domain_gap/<train_tag>/plots_ft/
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def get_plot_dir(
     train_tag = Path(train_set).stem.split("_")[-1]
     suffix = normalize_suffix(suffix)
 
-    return f"OUTPUT/domain_gap2/{train_tag}/plots{suffix}"
+    return f"OUTPUT/domain_gap/{train_tag}/plots{suffix}"
 
 
 # %% ARTIFACT UTILITIES

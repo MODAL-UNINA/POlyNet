@@ -19,12 +19,12 @@ Suffix convention
 -----------------
 Use --suffix without leading underscore, e.g.:
 
-  --suffix ftc9_o2
+  --suffix ft
 
-Internally, the suffix is normalized to '_ftc9_o2', producing paths such as:
+Internally, the suffix is normalized to '_ft', producing paths such as:
 
-  models/<model_name>/model_ftc9_o2.weights.h5
-  OUTPUT/attention_analysis/<model_name>/plots_ftc9_o2/
+  models/<model_name>/model_ft.weights.h5
+  OUTPUT/attention_analysis/<model_name>/plots_ft/
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
         default="ft",
         help=(
             "Suffix used for the weights file and output folder, without leading "
-            "underscore, e.g. 'ftc9_o2'. Input with leading underscore is also "
+            "underscore, e.g. 'ftc'. Input with leading underscore is also "
             "accepted. Use '' for base weights."
         ),
     )

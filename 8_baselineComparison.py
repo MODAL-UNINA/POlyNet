@@ -80,6 +80,18 @@ def parse_args() -> argparse.Namespace:
         default=6,
         help="GPU count used by the stored POlyNet global batch sizes.",
     )
+    parser.add_argument(
+        "--conv_batch_divisor",
+        type=int,
+        default=2,
+        help=(
+            "Reduce the CNN/ResCNN batch size relative to the reference "
+            "POlyNet batch by this integer factor. Default 2 gives "
+            "64 spectra/GPU for pretraining and 32/GPU for fine-tuning "
+            "on the original six-GPU setup. Use 4 if more memory headroom "
+            "is required. No gradient accumulation is used."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output_dir",
@@ -207,6 +219,12 @@ def load_finetuning(ft_dir: Path, suffix: str):
 
     if len(X) != len(y_w) or y_w.shape != y_c_norm.shape:
         raise ValueError("Inconsistent fine-tuning array shapes.")
+    if X.ndim != 2:
+        raise ValueError(f"Expected rank-2 FT spectra, got X.shape={X.shape}.")
+    if y_w.ndim != 2 or y_w.shape[1] != N_OUTPUTS:
+        raise ValueError(
+            f"Expected FT targets with {N_OUTPUTS} outputs, got {y_w.shape}."
+        )
 
     print(f"[INFO] Fine-tuning arrays: X={X.shape}, y={y_w.shape}")
     return X, y_w, y_c_norm
@@ -231,12 +249,30 @@ def build_targets(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_test(path: Path, composition_scaler, spectral_scaler):
-    """Prepare the experimental set, used only after model selection."""
+    """Prepare the held-out experimental set, used only after model selection."""
     print(f"[INFO] Loading experimental test set: {path}")
     df = pd.read_pickle(path)
+
+    required_columns = {"w", "fine-tuning", "copolymer"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise KeyError(
+            "Missing required experimental-test metadata columns: "
+            f"{sorted(missing_columns)}"
+        )
+
+    # Match the held-out experimental subset used by the POlyNet
+    # fine-tuning script: supervised rows only, excluding spectra used
+    # to construct the pseudo-synthetic FT set and rows marked TEST.
     df = df[
         df["w"].apply(lambda values: not any(np.isnan(v) for v in values))
     ].copy()
+    df = df[
+        (~df["fine-tuning"]) & (df["copolymer"] != "TEST")
+    ].copy()
+
+    if len(df) == 0:
+        raise ValueError("The held-out experimental test set is empty.")
 
     X = np.asarray(df.iloc[:, 4:].values, dtype=np.float32)
     X = normalize_spectra(X, spectral_scaler)[..., np.newaxis]
@@ -315,7 +351,15 @@ def build_loss_and_metrics(tf, utils, opts: dict):
 
 
 def compile_model(model, tf, utils, opts: dict, learning_rate: float):
+    """Compile one baseline with the same supervised losses as POlyNet.
+
+    Gradient accumulation is deliberately not used: in TensorFlow 2.17 /
+    Keras 3 the native optimizer accumulation path is not compatible with
+    this MirroredStrategy training setup because the conditional optimizer
+    update crosses an all-reduce synchronization boundary.
+    """
     losses, metrics = build_loss_and_metrics(tf, utils, opts)
+
     model.compile(
         optimizer=tf.keras.optimizers.Adam(
             learning_rate=learning_rate,
@@ -552,6 +596,8 @@ def main() -> None:
     # batch size if the comparison is run on a different number of replicas.
     if args.reference_gpu_count <= 0:
         raise ValueError("--reference_gpu_count must be positive.")
+    if args.conv_batch_divisor < 1:
+        raise ValueError("--conv_batch_divisor must be >= 1.")
 
     stored_pretrain_batch = int(reference_opts["batch_size"])
     stored_ft_batch = int(ft_opts["batch_size"])
@@ -561,12 +607,19 @@ def main() -> None:
     if stored_ft_batch % args.reference_gpu_count != 0:
         raise ValueError("Cannot infer reference per-GPU fine-tuning batch size.")
 
-    pretrain_batch = (
+    reference_pretrain_per_replica = (
         stored_pretrain_batch // args.reference_gpu_count
-    ) * strategy.num_replicas_in_sync
-    ft_batch = (
+    )
+    reference_ft_per_replica = (
         stored_ft_batch // args.reference_gpu_count
-    ) * strategy.num_replicas_in_sync
+    )
+
+    pretrain_effective_batch = (
+        reference_pretrain_per_replica * strategy.num_replicas_in_sync
+    )
+    ft_effective_batch = (
+        reference_ft_per_replica * strategy.num_replicas_in_sync
+    )
 
     X_synth, y_w_synth, y_c_norm_synth = load_synthetic(
         check_file(Path(args.synthetic_dataset)),
@@ -574,6 +627,18 @@ def main() -> None:
         spectral_scaler,
     )
     X_ft, y_w_ft, y_c_norm_ft = load_finetuning(ft_dir, suffix)
+
+    if "n_ft_samples" not in ft_opts:
+        raise KeyError(
+            f"{model_dir / f'opts{suffix}.json'} does not contain n_ft_samples."
+        )
+    expected_ft_samples = int(ft_opts["n_ft_samples"])
+    if len(X_ft) != expected_ft_samples:
+        raise ValueError(
+            "Fine-tuning artifact mismatch: "
+            f"opts{suffix}.json expects {expected_ft_samples} samples, "
+            f"but {ft_dir} contains {len(X_ft)}."
+        )
 
     output_dir = Path(args.output_dir) / f"seed_{args.seed}"
     split_dir = output_dir / "splits"
@@ -611,35 +676,21 @@ def main() -> None:
         f"{len(ft_val_idx)} val"
     )
 
-    synth_steps_per_epoch = len(synth_train_idx) // pretrain_batch
-    synth_validation_steps = len(synth_val_idx) // pretrain_batch
-    ft_steps_per_epoch = len(ft_train_idx) // ft_batch
-    ft_validation_steps = len(ft_val_idx) // ft_batch
-
-    if min(
-        synth_steps_per_epoch,
-        synth_validation_steps,
-        ft_steps_per_epoch,
-        ft_validation_steps,
-    ) <= 0:
-        raise ValueError(
-            "At least one split is smaller than its batch size; "
-            "cannot use drop_remainder=True with explicit epoch steps."
-        )
-
     print(
-        f"[INFO] Pretraining steps: {synth_steps_per_epoch}/epoch, "
-        f"{synth_validation_steps} validation"
+        f"[INFO] Reference pretraining global batch on this hardware: "
+        f"{pretrain_effective_batch}"
     )
     print(
-        f"[INFO] Fine-tuning steps: {ft_steps_per_epoch}/epoch, "
-        f"{ft_validation_steps} validation"
+        f"[INFO] Reference fine-tuning global batch on this hardware: "
+        f"{ft_effective_batch}"
     )
 
     # ------------------------------------------------------------------
     # Phase 1: train/select every neural baseline without touching the
     # experimental test set.
     # ------------------------------------------------------------------
+
+    batch_protocol = {}
 
     for model_name in requested_models:
         print("\n" + "=" * 72)
@@ -650,11 +701,111 @@ def main() -> None:
         np.random.seed(args.seed)
         tf.keras.utils.set_random_seed(args.seed)
 
+        # MLP can use the original POlyNet batch. The convolutional models
+        # require a smaller physical batch because their long intermediate
+        # feature maps dominate VRAM. We deliberately use a real smaller
+        # batch instead of Keras native gradient accumulation, which is not
+        # compatible with this TF 2.17 MirroredStrategy setup.
+        batch_divisor = (
+            1 if model_name == "mlp" else int(args.conv_batch_divisor)
+        )
+
+        if reference_pretrain_per_replica % batch_divisor != 0:
+            raise ValueError(
+                f"{model_name}: reference pretraining per-GPU batch "
+                f"{reference_pretrain_per_replica} is not divisible by "
+                f"batch_divisor={batch_divisor}."
+            )
+        if reference_ft_per_replica % batch_divisor != 0:
+            raise ValueError(
+                f"{model_name}: reference fine-tuning per-GPU batch "
+                f"{reference_ft_per_replica} is not divisible by "
+                f"batch_divisor={batch_divisor}."
+            )
+
+        pretrain_per_replica = (
+            reference_pretrain_per_replica // batch_divisor
+        )
+        ft_per_replica = (
+            reference_ft_per_replica // batch_divisor
+        )
+
+        pretrain_batch = (
+            pretrain_per_replica * strategy.num_replicas_in_sync
+        )
+        ft_batch = (
+            ft_per_replica * strategy.num_replicas_in_sync
+        )
+
+        # An epoch remains one pass over the same shared train/validation
+        # split (up to the same drop_remainder convention used by POlyNet).
+        # Smaller convolutional batches therefore imply more optimizer
+        # updates per epoch, which is the standard semantics of batch size.
+        synth_steps_per_epoch = (
+            len(synth_train_idx) // pretrain_batch
+        )
+        synth_validation_steps = (
+            len(synth_val_idx) // pretrain_batch
+        )
+        ft_steps_per_epoch = (
+            len(ft_train_idx) // ft_batch
+        )
+        ft_validation_steps = (
+            len(ft_val_idx) // ft_batch
+        )
+
+        if min(
+            synth_steps_per_epoch,
+            synth_validation_steps,
+            ft_steps_per_epoch,
+            ft_validation_steps,
+        ) <= 0:
+            raise ValueError(
+                f"{model_name}: a split is smaller than its batch size."
+            )
+
+        batch_protocol[model_name] = {
+            "batch_divisor_vs_reference": batch_divisor,
+            "pretrain_batch_global": pretrain_batch,
+            "pretrain_batch_per_replica": pretrain_per_replica,
+            "pretrain_steps_per_epoch": synth_steps_per_epoch,
+            "ft_batch_global": ft_batch,
+            "ft_batch_per_replica": ft_per_replica,
+            "ft_steps_per_epoch": ft_steps_per_epoch,
+            "gradient_accumulation": False,
+        }
+
+        print(
+            f"[INFO] Batch divisor vs reference: {batch_divisor}"
+        )
+        print(
+            f"[INFO] Pretraining batch: {pretrain_batch} global "
+            f"({pretrain_per_replica}/replica)"
+        )
+        print(
+            f"[INFO] Fine-tuning batch: {ft_batch} global "
+            f"({ft_per_replica}/replica)"
+        )
+        print(
+            f"[INFO] Pretraining: {synth_steps_per_epoch} "
+            f"optimizer updates/epoch"
+        )
+        print(
+            f"[INFO] Fine-tuning: {ft_steps_per_epoch} "
+            f"optimizer updates/epoch"
+        )
+
         baseline_dir = checkpoint_dir / model_name
         baseline_dir.mkdir(parents=True, exist_ok=True)
 
         pretrained_weights = baseline_dir / "model.weights.h5"
         finetuned_weights = baseline_dir / f"model{suffix}.weights.h5"
+        pretrain_history_path = (
+            history_dir / f"{model_name}_pretrain.json"
+        )
+        finetune_history_path = (
+            history_dir / f"{model_name}_finetune.json"
+        )
 
         with strategy.scope():
             model = build_baseline_model(
@@ -670,52 +821,135 @@ def main() -> None:
 
         print(f"[INFO] Parameters: {model.count_params():,}")
 
-        if args.force_retrain or not pretrained_weights.exists():
+        # ModelCheckpoint writes a file during training, so weights alone
+        # cannot prove that the stage completed. save_history() runs only
+        # after model.fit() returns normally; weights + history therefore
+        # form the completion criterion.
+        pretrain_complete = (
+            pretrained_weights.exists()
+            and pretrain_history_path.exists()
+        )
+        pretrain_retrained = False
+
+        if args.force_retrain or not pretrain_complete:
+            if pretrained_weights.exists() or pretrain_history_path.exists():
+                print(
+                    "[WARNING] Incomplete/stale pretraining artifacts found; "
+                    "retraining this stage from scratch."
+                )
+
+            pretrained_weights.unlink(missing_ok=True)
+            pretrain_history_path.unlink(missing_ok=True)
+
             train_ds = make_dataset(
-                tf, X_synth, y_w_synth, y_c_norm_synth,
-                synth_train_idx, pretrain_batch, True, args.seed
+                tf,
+                X_synth,
+                y_w_synth,
+                y_c_norm_synth,
+                synth_train_idx,
+                pretrain_batch,
+                True,
+                args.seed,
             )
             val_ds = make_dataset(
-                tf, X_synth, y_w_synth, y_c_norm_synth,
-                synth_val_idx, pretrain_batch, False, args.seed
+                tf,
+                X_synth,
+                y_w_synth,
+                y_c_norm_synth,
+                synth_val_idx,
+                pretrain_batch,
+                False,
+                args.seed,
             )
 
             with strategy.scope():
                 pretrain(
-                    model, tf, utils, reference_opts,
-                    train_ds, val_ds,
+                    model,
+                    tf,
+                    utils,
+                    reference_opts,
+                    train_ds,
+                    val_ds,
                     synth_steps_per_epoch,
                     synth_validation_steps,
                     pretrained_weights,
-                    history_dir / f"{model_name}_pretrain.json",
+                    pretrain_history_path,
                 )
+
             del train_ds, val_ds
+            pretrain_retrained = True
         else:
-            print(f"[INFO] Reusing {pretrained_weights}")
+            print(
+                f"[INFO] Reusing completed pretraining checkpoint: "
+                f"{pretrained_weights}"
+            )
             model.load_weights(pretrained_weights)
 
-        if args.force_retrain or not finetuned_weights.exists():
+        finetune_complete = (
+            finetuned_weights.exists()
+            and finetune_history_path.exists()
+        )
+
+        # A changed pretraining checkpoint necessarily invalidates the
+        # fine-tuned checkpoint that depended on it.
+        must_finetune = (
+            args.force_retrain
+            or pretrain_retrained
+            or not finetune_complete
+        )
+
+        if must_finetune:
+            if finetuned_weights.exists() or finetune_history_path.exists():
+                print(
+                    "[WARNING] Incomplete/stale fine-tuning artifacts found "
+                    "or pretraining changed; retraining fine-tuning."
+                )
+
+            finetuned_weights.unlink(missing_ok=True)
+            finetune_history_path.unlink(missing_ok=True)
+
             train_ds = make_dataset(
-                tf, X_ft, y_w_ft, y_c_norm_ft,
-                ft_train_idx, ft_batch, True, args.seed
+                tf,
+                X_ft,
+                y_w_ft,
+                y_c_norm_ft,
+                ft_train_idx,
+                ft_batch,
+                True,
+                args.seed,
             )
             val_ds = make_dataset(
-                tf, X_ft, y_w_ft, y_c_norm_ft,
-                ft_val_idx, ft_batch, False, args.seed
+                tf,
+                X_ft,
+                y_w_ft,
+                y_c_norm_ft,
+                ft_val_idx,
+                ft_batch,
+                False,
+                args.seed,
             )
 
             with strategy.scope():
                 finetune(
-                    model, tf, utils, reference_opts, ft_opts,
-                    train_ds, val_ds,
+                    model,
+                    tf,
+                    utils,
+                    reference_opts,
+                    ft_opts,
+                    train_ds,
+                    val_ds,
                     ft_steps_per_epoch,
                     ft_validation_steps,
                     finetuned_weights,
-                    history_dir / f"{model_name}_finetune.json",
+                    finetune_history_path,
                 )
+
             del train_ds, val_ds
         else:
-            print(f"[INFO] Reusing {finetuned_weights}")
+            print(
+                f"[INFO] Reusing completed fine-tuned checkpoint: "
+                f"{finetuned_weights}"
+            )
             model.load_weights(finetuned_weights)
 
         del model
@@ -797,8 +1031,10 @@ def main() -> None:
             "current_replica_count": strategy.num_replicas_in_sync,
             "synthetic_validation_split": reference_opts["validation_split"],
             "ft_validation_split": ft_opts["validation_split"],
-            "pretrain_batch_size": pretrain_batch,
-            "ft_batch_size": ft_batch,
+            "reference_pretrain_batch_size": pretrain_effective_batch,
+            "reference_ft_batch_size": ft_effective_batch,
+            "conv_batch_divisor": args.conv_batch_divisor,
+            "batch_protocol_by_model": batch_protocol,
             "weight_loss": reference_opts["loss_weights"],
             "composition_loss": reference_opts["loss_composition"],
             "test_presence_threshold": TEST_THRESHOLD,

@@ -113,7 +113,7 @@ def get_plot_dir(run_name, suffix):
     """Return plot directory for the evaluated model."""
     suffix = normalize_suffix(suffix)
 
-    plot_dir = f"OUTPUT/eval_models2/{run_name}/plots{suffix}"
+    plot_dir = f"OUTPUT/eval_models/{run_name}/plots{suffix}"
     os.makedirs(plot_dir, exist_ok=True)
 
     return plot_dir

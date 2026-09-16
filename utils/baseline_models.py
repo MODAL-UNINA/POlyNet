@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Neural baselines for the POlyNet architecture comparison.
 
-The baselines preserve the analytical task used by POlyNet (joint prediction of
-polymer weight fractions and copolymer compositions) but deliberately exclude
-POlyNet-specific components such as the multi-scale stem, self-attention,
-attention pooling, cross-task coupling, and consistency regularization.
-"""
 
 from __future__ import annotations
 

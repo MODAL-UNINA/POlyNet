@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--proportion_weights",
         type=str,
-        default="0.45,0.55,0.05",
+        default="0.40,0.55,0.05",
         help=(
             "Sampling proportions for 1-, 2-, ..., n_max_components-component "
             "spectra. Example: '0.25,0.25,0.25,0.25'."

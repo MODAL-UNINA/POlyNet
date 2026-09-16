@@ -2,6 +2,8 @@
 
 POlyNet: Transformer-based deep learning framework for ultra-fast, automated, and interpretable analysis of polyolefin multimaterials from <sup>13</sup>C NMR spectra, enabling accurate identification, quantification, and characterization for polymer recycling applications.
 
+Manuscript: *Deep Learning Aided <sup>13</sup>C-NMR Analysis of Post-Consumer Polyolefin Multimaterials*.
+
 ## Overview
 This repository provides an end‑to‑end workflow to:
 
@@ -9,8 +11,6 @@ This repository provides an end‑to‑end workflow to:
 2. **Train** a multi‑task deep‑learning model that predicts both **weights** and **compositions** of the copolymers present;
 3. **Fine‑tune** the model on experimental data;
 4. **Evaluate** model performance and create insightful plots;
-
->N.B A statistical **Analysis** of the generated synthetic dataset can be performed through the `synthDataAnalysis.py` script.
 
 The code is built on TensorFlow with **multi‑GPU** support and can run on local workstations or HPC clusters.
 
@@ -20,13 +20,14 @@ The code is built on TensorFlow with **multi‑GPU** support and can run on loca
 ```text
 .
 ├── 0_synthDataGen.py        # Synthetic dataset generation
-├── 1_trainModel.py          # Baseline model training on synthetic data
+├── 1_trainModel.py          # POlyNet model training on synthetic data
 ├── 2_fineTuneModel.py       # Fine‑tuning on pseudo-synthetic data
 ├── 3_testModel.py           # Evaluation and insight generation
 ├── 4_domainGapAnalysis.py   # UMAP analysis of the synthetic/experimental domain gap
 ├── 5_peakShiftAnalysis.py   # Peak-shift analysis using experimental references
 ├── 6_attentionAnalysis.py   # Attention and Integrated Gradients analysis
-├── synthDataAnalysis.py     # Statistical analysis of the synthetic set
+├── 8_baselineComparison.py  # Baseline-model training and comparison evaluation
+├── 9_baselineAnalysis.py    # Final post-hoc baseline analysis (no training)
 ├── utils/                   # Helper modules (losses, model blocks, etc.)
 ├── DATASET/                 # NMR libraries, synthetic data and test set
 ├── models/                  # Saved models
@@ -42,12 +43,14 @@ The code is built on TensorFlow with **multi‑GPU** support and can run on loca
 This project ships with a fully‑pinned Conda environment file (environment.yml).  Key specs:
 | Requirement | Version / Notes |
 |------|----------|
-Python | 3.12.6 |
-TensorFlow | 2.17.0 GPU build (CUDA 12.6) |
-CUDA / cuDNN | CUDA 12 Toolkit, cuDNN ≥ 8.9 |
-Nvidia Drivers | 550.163.01
+| Python | 3.12.6 (pinned in `environment.yml`) |
+| TensorFlow | 2.17.0 GPU build in `environment.yml` |
+| CUDA | 12.6 (as pinned in `environment.yml`) |
+| cuDNN | 9.2.1.18 (as pinned in `environment.yml`) |
 
->⚠️ A recent NVIDIA GPU (Ampere or newer) is highly recommended—the code also runs on CPU but will be considerably slower.
+TensorFlow 2.17.0 is the reference and tested version for the final POlyNet workflow. The repository does not verify an operating-system version, GPU model, or NVIDIA driver version.
+
+>⚠️ A recent NVIDIA GPU is recommended for training—the code also supports CPU execution, although it is slower.
 
 ## Create the environment
 
@@ -77,7 +80,7 @@ conda activate polynet-env
 
 ## Quick start
 
-The following commands use one consistent model name and suffix throughout the pipeline.
+The following commands show a complete example workflow. The baseline comparison uses the canonical public POlyNet reference run.
 
 ```bash
 # 1. Generate 10,000 spectra containing one to three components.
@@ -100,10 +103,11 @@ python 1_trainModel.py \
   --test_dataset DATASET/test_data.pkl \
   --run_name polynet_example
 
-# 3. Fine-tune it. --suffix is required.
+# 3. Fine-tune it using the manuscript dataset size. --suffix is required.
 python 2_fineTuneModel.py \
   --gpus 0,1 \
-  --dataset_size 25000 \
+  --dataset_size 20000 \
+  --masking 1 \
   --batch_size 64 \
   --model_name polynet_example \
   --suffix ft \
@@ -142,6 +146,19 @@ python 6_attentionAnalysis.py \
   --synth_ppm_domain DATASET/ppm_domain_general.pkl \
   --n_samples_analysis 1000 \
   --batch_size 32
+
+# 8. Train and select the baseline models using the canonical POlyNet run.
+python 8_baselineComparison.py \
+  --reference_run model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm \
+  --ft_suffix ft \
+  --synthetic_dataset DATASET/synthetic_dataset.pkl \
+  --test_dataset DATASET/test_data.pkl \
+  --output_dir OUTPUT/baseline_comparison
+
+# 9. Run the post-hoc baseline analysis.
+python 9_baselineAnalysis.py \
+  --test_dataset DATASET/test_data.pkl \
+  --benchmark_dir OUTPUT/baseline_comparison/seed_42
 ```
 
 Every command supports `--help`, for example:
@@ -162,7 +179,7 @@ python 5_peakShiftAnalysis.py --help
 | `--n_samples` | `10000` | Number of spectra to generate |
 | `--composition_points` | `30` | Composition-grid points per polymer class |
 | `--n_max_components` | `3` | Maximum number of components in a mixture |
-| `--proportion_weights` | `0.45,0.55,0.05` | Proportions for 1-, 2-, ..., N-component samples |
+| `--proportion_weights` | `0.40,0.55,0.05` | Proportions for 1-, 2-, ..., N-component samples |
 | `--weight_step` | `0.02` | Weight-grid step |
 | `--min_weight` | `0.04` | Minimum component weight |
 | `--max_weight` | `0.96` | Maximum component weight |
@@ -170,7 +187,7 @@ python 5_peakShiftAnalysis.py --help
 | `--n_jobs` | `96` | Parallel generation jobs |
 | `--random_seed` | `42` | NumPy random seed |
 
-`--proportion_weights` must contain exactly `n_max_components` values and their sum must be 1. The current in-code default sums to 1.05, so pass an explicit valid value such as `0.4,0.5,0.1` when using three components.
+`--proportion_weights` must contain exactly `n_max_components` values and their sum must be 1. The in-code default is valid for the default `n_max_components=3`; pass an explicit valid value when changing the component count.
 
 ### `1_trainModel.py`
 
@@ -191,7 +208,7 @@ python 5_peakShiftAnalysis.py --help
 | Option | Default | Meaning |
 |---|---:|---|
 | `--gpus` | `0,1,2,3,4,5` | Comma-separated GPU indices |
-| `--dataset_size` | `25000` | Number of pseudo-synthetic fine-tuning examples |
+| `--dataset_size` | `25000` | Generic CLI default; the manuscript configuration used 20,000 |
 | `--n_max_components` | `2` | Maximum components in generated mixtures |
 | `--masking` | `0` | Random masking: `0` or `1` |
 | `--proportion_weights` | `0.4, 0.6` | Fractions for single- and multi-component examples |
@@ -263,19 +280,43 @@ Outputs, including `experimental_reference_peaks.json`, are written to `OUTPUT/p
 
 Outputs are written to `OUTPUT/attention_analysis/<model_name>/plots<suffix>/` unless `--output_dir` is supplied.
 
-## Legacy synthetic-data analysis
+### `8_baselineComparison.py`
 
-`synthDataAnalysis.py` has no command-line parser. Before running it, edit `synthetic_dataset_name`, `test_dataset_name` and `LIBRARY_PATH` in the configuration block near the top of the file, then execute:
+| Option | Default | Meaning |
+|---|---:|---|
+| `--reference_run` | `model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm` | POlyNet run whose scalers, options and reference weights are reused |
+| `--ft_suffix` | `ft` | Suffix for fine-tuning arrays and POlyNet fine-tuned weights |
+| `--ft_dir` | `None` | Fine-tuning-array folder; defaults to `ft_sets/<reference_run>` |
+| `--synthetic_dataset` | `DATASET/synthetic_dataset.pkl` | Synthetic training dataset |
+| `--test_dataset` | `DATASET/test_data.pkl` | Held-out experimental dataset |
+| `--models` | `pls,mlp,cnn,rescnn` | Comma-separated subset of `pls`, `mlp`, `cnn`, `rescnn` |
+| `--gpus` | `0,1,2,3,4,5` | Comma-separated GPU indices |
+| `--reference_gpu_count` | `6` | GPU count represented by the stored POlyNet batch sizes; must be positive |
+| `--conv_batch_divisor` | `2` | CNN/ResCNN batch-size divisor; must be positive |
+| `--pls_synthetic_samples` | `10000` | Synthetic spectra added to the PLS training set; must be positive |
+| `--seed` | `42` | Random seed for deterministic splits and baseline training |
+| `--output_dir` | `OUTPUT/baseline_comparison` | Baseline output root |
+| `--force_retrain` | off | Retrain existing baseline artifacts when present |
 
-```bash
-python synthDataAnalysis.py
-```
+This script trains and selects the PLS, MLP, CNN and ResCNN baselines, then evaluates their frozen checkpoints alongside POlyNet. Outputs are written to `OUTPUT/baseline_comparison/seed_<seed>/`.
+
+### `9_baselineAnalysis.py`
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--reference_run` | `model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm` | POlyNet run whose model, options and validation resources are used |
+| `--ft_suffix` | `ft` | Suffix for the frozen POlyNet weights; leading underscores are normalized |
+| `--test_dataset` | `DATASET/test_data.pkl` | Experimental evaluation dataset |
+| `--benchmark_dir` | `OUTPUT/baseline_comparison/seed_42` | Directory produced by `8_baselineComparison.py` |
+| `--output_dir` | `None` | Analysis output directory; defaults to `<benchmark_dir>/analysis` |
+
+Run this post-hoc analysis after `8_baselineComparison.py`. It performs no training or model selection: it loads the frozen baseline and POlyNet models, computes the final comparative metrics, and writes predictions and figures to `<benchmark_dir>/analysis/`.
 
 ## Output locations
 
 | Path | Contents |
 |---|---|
-| `DATASET/*.pkl` | Generated datasets and ppm-domain data |
+| `DATASET/*.pkl` and `DATASET/*_metadata.json` | Generated datasets, ppm-domain data and generation metadata |
 | `models/<model_name>/` | Model definition, weights, options and histories |
 | `val_sets/<model_name>/` | Validation arrays and scalers |
 | `ft_sets/<model_name>/` | Fine-tuning arrays keyed by suffix |
@@ -283,11 +324,11 @@ python synthDataAnalysis.py
 | `OUTPUT/domain_gap/` | UMAP domain-gap plots |
 | `OUTPUT/peak_shift/` | Peak-shift plots and reference-peak JSON |
 | `OUTPUT/attention_analysis/` | Attention and Integrated Gradients analyses |
-| `OUTPUT/synth_data_analysis/` | Legacy dataset-analysis plots |
+| `OUTPUT/baseline_comparison/` | Baseline checkpoints, metrics and final comparative analyses |
 
 ## Citation
 
-This repository contains the implementation of the pipeline presented in the paper (under review), *Automated Ultra-Fast <sup>13</sup>C NMR Analysis of Polyolefin Multimaterials*.
+This repository contains the implementation of the pipeline presented in the paper (under review), *Deep Learning Aided <sup>13</sup>C-NMR Analysis of Post-Consumer Polyolefin Multimaterials*.
 
 ## Contact
 

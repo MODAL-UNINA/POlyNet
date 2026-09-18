@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Train and evaluate the simple baselines used in the POlyNet comparison.
+"""Train and select the simple baselines used in the POlyNet comparison.
 
 Baselines:
 - PLS: classical chemometric baseline;
@@ -8,15 +8,12 @@ Baselines:
 - CNN: conventional 1D-CNN baseline;
 - ResCNN: residual 1D-CNN baseline.
 
-POlyNet is not retrained here: the original fine-tuned model is loaded only
-for the final comparison.
-
 Common rules:
 - same POlyNet spectral/composition scalers;
 - same deterministic synthetic and fine-tuning train/validation splits;
 - same supervised targets and losses for the neural models;
-- no experimental test-set access during training/model selection;
-- one final evaluation on the same held-out experimental set.
+- save frozen baseline artifacts for the final comparison in
+  ``9_baselineAnalysis.py``.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.metrics import precision_recall_fscore_support
 
 
 LABELS = ["LDPE", "PE", "PP", "EH", "EO", "EB", "RACO", "EPR"]
@@ -69,18 +65,18 @@ def normalize_suffix(value: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="POlyNet baseline comparison.",
+        description="POlyNet baseline training and selection.",
         allow_abbrev=False,
     )
     parser.add_argument(
         "--reference_run",
         default=DEFAULT_REFERENCE_RUN,
-        help="POlyNet run whose scalers/options/reference weights are reused.",
+        help="POlyNet run whose scalers and options are reused.",
     )
     parser.add_argument(
         "--ft_suffix",
         default="ft",
-        help="Suffix of the saved fine-tuning arrays and POlyNet FT weights.",
+        help="Suffix of the saved fine-tuning arrays.",
     )
     parser.add_argument(
         "--ft_dir",
@@ -90,10 +86,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--synthetic_dataset",
         default="DATASET/synthetic_dataset.pkl",
-    )
-    parser.add_argument(
-        "--test_dataset",
-        default="DATASET/test_data.pkl",
     )
     parser.add_argument(
         "--models",
@@ -261,139 +253,6 @@ def load_finetuning(ft_dir: Path, suffix: str):
 
     print(f"[INFO] Fine-tuning arrays: X={X.shape}, y={y_w.shape}")
     return X, y_w, y_c, y_c_norm
-
-
-def build_targets(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    label_to_index = {label: i for i, label in enumerate(LABELS)}
-    y_w = np.zeros((len(df), N_OUTPUTS), dtype=np.float32)
-    y_c = np.zeros((len(df), N_OUTPUTS), dtype=np.float32)
-
-    for row_i, (_, row) in enumerate(df.iterrows()):
-        for label, weight, composition in zip(
-            row["copo_tuple"], row["w"], row["c"]
-        ):
-            if label not in label_to_index:
-                raise ValueError(f"Unknown test label: {label}")
-            j = label_to_index[label]
-            y_w[row_i, j] = weight
-            y_c[row_i, j] = composition
-
-    return y_w, y_c
-
-
-def _composition_scalar(value) -> float:
-    if isinstance(value, (list, tuple, np.ndarray)) and len(value) > 0:
-        return float(value[0])
-    return np.nan
-
-
-def get_finetuning_source_indices(df: pd.DataFrame) -> list:
-    """Reconstruct the experimental prototypes used to generate the FT set.
-
-    This mirrors the deterministic prototype selection in 2_fineTuneModel.py.
-    The original script creates the ``fine-tuning`` flag only in memory, so we
-    reconstruct the same indices instead of assuming that column exists in the
-    saved test_data.pkl.
-    """
-    n_random_samples = {
-        "LDPE": 5,
-        "PE": 14,
-        "PP": 25,
-        "EH": 30,
-        "EO": 20,
-        "EB": 20,
-        "RACO": 25,
-        "EPR": 20,
-    }
-    composition_classes = {"EH", "EO", "EB", "RACO", "EPR"}
-
-    singles = df[
-        (df["copo_tuple"].apply(lambda x: len(x) == 1))
-        & (df["copolymer"] != "TEST")
-    ]
-
-    selected = []
-
-    for label in singles["copolymer"].unique():
-        class_df = singles[singles["copolymer"] == label].copy()
-        n_req = n_random_samples.get(label, 20)
-
-        if label not in composition_classes:
-            chosen = class_df.sample(
-                n=n_req,
-                replace=len(class_df) < n_req,
-                random_state=42,
-            )
-            selected.extend(chosen.index.to_list())
-            continue
-
-        class_df["comp_scalar"] = class_df["c"].apply(_composition_scalar)
-        class_df = class_df.dropna(subset=["comp_scalar"])
-
-        if len(class_df) == 0:
-            continue
-
-        if len(class_df) <= n_req:
-            chosen = class_df.sample(
-                n=n_req,
-                replace=True,
-                random_state=42,
-            )
-            selected.extend(chosen.index.to_list())
-            continue
-
-        try:
-            class_df["comp_bin"] = pd.qcut(
-                class_df["comp_scalar"], q=5, duplicates="drop"
-            )
-        except ValueError:
-            class_df["comp_bin"] = pd.cut(class_df["comp_scalar"], bins=5)
-
-        bin_counts = class_df["comp_bin"].value_counts()
-        class_df["sampling_weight"] = class_df["comp_bin"].apply(
-            lambda b: 1.0 / bin_counts[b]
-        )
-        chosen = class_df.sample(
-            n=n_req,
-            replace=False,
-            weights="sampling_weight",
-            random_state=42,
-        )
-        selected.extend(chosen.index.to_list())
-
-    return selected
-
-
-def load_test(path: Path, spectral_scaler):
-    """Prepare the held-out experimental set after all model selection."""
-    print(f"[INFO] Loading held-out experimental test set: {path}")
-    df = pd.read_pickle(path)
-
-    required = {"w", "c", "copo_tuple", "copolymer"}
-    missing = required - set(df.columns)
-    if missing:
-        raise KeyError(f"Missing test metadata columns: {sorted(missing)}")
-
-    ft_source_indices = set(get_finetuning_source_indices(df))
-
-    df = df[
-        df["w"].apply(lambda values: not any(np.isnan(v) for v in values))
-    ].copy()
-    df = df[df["copolymer"] != "TEST"].copy()
-    df = df[~df.index.isin(ft_source_indices)].copy()
-
-    if len(df) == 0:
-        raise ValueError("The held-out experimental test set is empty.")
-
-    X = np.asarray(df.iloc[:, 4:].values, dtype=np.float32)
-    X = normalize_spectra(X, spectral_scaler)
-    y_w, y_c = build_targets(df)
-
-    print(
-        f"[INFO] Test: X={X.shape}, y={y_w.shape}; "
-        f"excluded FT source spectra={len(ft_source_indices)}"
-    )
-    return X, y_w, y_c
 
 
 # -----------------------------------------------------------------------------
@@ -660,79 +519,6 @@ def predict_pls(bundle: dict, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return y_w_pred, y_c_pred
 
 
-# -----------------------------------------------------------------------------
-# Common evaluation
-# -----------------------------------------------------------------------------
-
-
-def compute_metrics(
-    y_w_true: np.ndarray,
-    y_c_true: np.ndarray,
-    y_w_pred: np.ndarray,
-    y_c_pred: np.ndarray,
-) -> dict:
-    true_presence = y_w_true > 0
-    pred_presence = y_w_pred >= TEST_THRESHOLD
-
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        true_presence.astype(int),
-        pred_presence.astype(int),
-        average="macro",
-        zero_division=0,
-    )
-
-    weight_mae = float(
-        np.mean(np.abs(y_w_true - y_w_pred)[true_presence])
-    )
-    exact_match = float(
-        np.mean(np.all(true_presence == pred_presence, axis=1))
-    )
-
-    copolymer_present = true_presence[:, 3:]
-    composition_mae = float(
-        np.mean(
-            np.abs(y_c_true[:, 3:] - y_c_pred[:, 3:])[copolymer_present]
-        )
-    )
-
-    fp_mass = float(
-        np.mean(
-            np.sum(
-                np.where(~true_presence, y_w_pred, 0.0),
-                axis=1,
-            )
-        )
-    )
-
-    return {
-        "detection_macro_precision": float(precision),
-        "detection_macro_recall": float(recall),
-        "detection_macro_f1": float(f1),
-        "exact_component_set_accuracy": exact_match,
-        "weight_mae_present": weight_mae,
-        "composition_mae_copolymers": composition_mae,
-        "false_positive_weight_mass": fp_mass,
-    }
-
-
-def evaluate_neural(model, X_test, y_w_true, y_c_true, composition_scaler):
-    pred = model.predict(
-        X_test[..., np.newaxis],
-        batch_size=64,
-        verbose=1,
-    )
-    y_w_pred = np.asarray(pred["weight_output"], dtype=np.float32)
-    y_c_pred_norm = np.asarray(pred["composition_output"], dtype=np.float32)
-    y_c_pred = denormalize_compositions(y_c_pred_norm, composition_scaler)
-
-    return compute_metrics(
-        y_w_true,
-        y_c_true,
-        y_w_pred,
-        y_c_pred,
-    )
-
-
 def load_reference_polynet(model_dir: Path, reference_opts: dict, suffix: str):
     """Load the original fine-tuned POlyNet without retraining it."""
     model_py = check_file(model_dir / "model.py")
@@ -755,7 +541,7 @@ def load_reference_polynet(model_dir: Path, reference_opts: dict, suffix: str):
 
 
 # -----------------------------------------------------------------------------
-# Main benchmark
+# Main baseline training and selection
 # -----------------------------------------------------------------------------
 
 
@@ -844,9 +630,7 @@ def main() -> None:
     split_dir = output_dir / "splits"
     checkpoint_dir = output_dir / "checkpoints"
     history_dir = output_dir / "history"
-    result_dir = output_dir / "results"
-
-    for directory in (split_dir, checkpoint_dir, history_dir, result_dir):
+    for directory in (split_dir, checkpoint_dir, history_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     synth_train_idx, synth_val_idx = get_or_create_split(
@@ -1089,117 +873,6 @@ def main() -> None:
         del model
         tf.keras.backend.clear_session()
 
-    # ------------------------------------------------------------------
-    # Phase 2: one final held-out experimental evaluation
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 72)
-    print("[INFO] FINAL EXPERIMENTAL EVALUATION")
-    print("=" * 72)
-
-    X_test, y_w_test, y_c_test = load_test(
-        check_file(Path(args.test_dataset)),
-        spectral_scaler,
-    )
-
-    results = []
-
-    for model_name in requested_models:
-        print(f"\n[INFO] Evaluating {model_name.upper()}")
-
-        if model_name == "pls":
-            bundle = joblib.load(check_file(pls_path))
-            y_w_pred, y_c_pred = predict_pls(bundle, X_test)
-            metrics = compute_metrics(
-                y_w_test,
-                y_c_test,
-                y_w_pred,
-                y_c_pred,
-            )
-            n_parameters = int(bundle["weight_model"].coef_.size)
-            n_parameters += sum(
-                int(model.coef_.size)
-                for model in bundle["composition_models"].values()
-            )
-            metrics["parameters"] = n_parameters
-            metrics["weights_file_mb"] = float(pls_path.stat().st_size / 1024**2)
-            metrics["model"] = "PLS"
-        else:
-            finetuned_weights = (
-                checkpoint_dir / model_name / f"model{suffix}.weights.h5"
-            )
-            check_file(finetuned_weights)
-
-            with strategy.scope():
-                model = build_baseline_model(
-                    model_name,
-                    n_outputs=N_OUTPUTS,
-                    reg_l2=float(reference_opts["reg_l2"]),
-                    dropout_rate=float(reference_opts["dropout_rate"]),
-                )
-                _ = model(X_test[:1, ..., np.newaxis], training=False)
-                model.load_weights(finetuned_weights)
-
-            metrics = evaluate_neural(
-                model,
-                X_test,
-                y_w_test,
-                y_c_test,
-                composition_scaler,
-            )
-            metrics["parameters"] = int(model.count_params())
-            metrics["weights_file_mb"] = float(
-                finetuned_weights.stat().st_size / 1024**2
-            )
-            metrics["model"] = model_name.upper()
-
-            del model
-            tf.keras.backend.clear_session()
-
-        save_json(result_dir / f"{model_name}.json", metrics)
-        results.append(metrics)
-        print(
-            f"[RESULT] F1={metrics['detection_macro_f1']:.4f} | "
-            f"W-MAE={metrics['weight_mae_present']:.4f} | "
-            f"C-MAE={metrics['composition_mae_copolymers']:.4f}"
-        )
-
-    # POlyNet reference: evaluated on exactly the same held-out set.
-    print("\n[INFO] Evaluating POlyNet reference")
-    with strategy.scope():
-        polynet, polynet_weights = load_reference_polynet(
-            model_dir,
-            reference_opts,
-            suffix,
-        )
-        _ = polynet(X_test[:1, ..., np.newaxis], training=False)
-        polynet.load_weights(polynet_weights)
-
-    metrics = evaluate_neural(
-        polynet,
-        X_test,
-        y_w_test,
-        y_c_test,
-        composition_scaler,
-    )
-    metrics["model"] = "POlyNet"
-    metrics["parameters"] = int(polynet.count_params())
-    metrics["weights_file_mb"] = float(polynet_weights.stat().st_size / 1024**2)
-    save_json(result_dir / "polynet.json", metrics)
-    results.append(metrics)
-
-    print(
-        f"[RESULT] F1={metrics['detection_macro_f1']:.4f} | "
-        f"W-MAE={metrics['weight_mae_present']:.4f} | "
-        f"C-MAE={metrics['composition_mae_copolymers']:.4f}"
-    )
-
-    del polynet
-    tf.keras.backend.clear_session()
-
-    results_df = pd.DataFrame(results)
-    csv_path = output_dir / "baseline_comparison.csv"
-    results_df.to_csv(csv_path, index=False)
-
     protocol = {
         "reference_run": reference_run,
         "ft_suffix": suffix,
@@ -1217,14 +890,13 @@ def main() -> None:
         "batch_protocol": batch_protocol,
         "pls_component_grid": list(PLS_COMPONENT_GRID),
         "pls_synthetic_samples": args.pls_synthetic_samples,
-        "test_presence_threshold": TEST_THRESHOLD,
-        "experimental_test_used_during_training": False,
+        "experimental_dataset_used_for_training_or_selection": False,
     }
     save_json(output_dir / "protocol.json", protocol)
 
-    print("\n[INFO] Baseline comparison complete.")
-    print(results_df.to_string(index=False))
-    print(f"[INFO] Results: {csv_path}")
+    print("\n[INFO] Baseline training and selection complete.")
+    print(f"[INFO] Frozen artifacts: {checkpoint_dir}")
+    print(f"[INFO] Protocol metadata: {output_dir / 'protocol.json'}")
 
 
 if __name__ == "__main__":

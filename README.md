@@ -26,8 +26,8 @@ The code is built on TensorFlow with **multi‑GPU** support and can run on loca
 ├── 4_domainGapAnalysis.py   # UMAP analysis of the synthetic/experimental domain gap
 ├── 5_peakShiftAnalysis.py   # Peak-shift analysis using experimental references
 ├── 6_attentionAnalysis.py   # Attention and Integrated Gradients analysis
-├── 8_baselineComparison.py  # Baseline-model training and comparison evaluation
-├── 9_baselineAnalysis.py    # Final post-hoc baseline analysis (no training)
+├── 8_baselineComparison.py  # Baseline-model training and selection
+├── 9_baselineAnalysis.py    # Final post-hoc baseline comparison
 ├── utils/                   # Helper modules (losses, model blocks, etc.)
 ├── DATASET/                 # NMR libraries, synthetic data and test set
 ├── models/                  # Saved models
@@ -148,10 +148,9 @@ python 8_baselineComparison.py \
   --reference_run model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm \
   --ft_suffix ft \
   --synthetic_dataset DATASET/synthetic_dataset.pkl \
-  --test_dataset DATASET/test_data.pkl \
   --output_dir OUTPUT/baseline_comparison
 
-# 9. Run the post-hoc baseline analysis.
+# 9. Run the final post-hoc baseline comparison.
 python 9_baselineAnalysis.py \
   --test_dataset DATASET/test_data.pkl \
   --benchmark_dir OUTPUT/baseline_comparison/seed_42
@@ -280,11 +279,10 @@ Outputs are written to `OUTPUT/attention_analysis/<model_name>/plots<suffix>/` u
 
 | Option | Default | Meaning |
 |---|---:|---|
-| `--reference_run` | `model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm` | POlyNet run whose scalers, options and reference weights are reused |
-| `--ft_suffix` | `ft` | Suffix for fine-tuning arrays and POlyNet fine-tuned weights |
+| `--reference_run` | `model_weights_kl_mse_loss_composition_neg2_mse_hybrid_norm` | POlyNet run whose scalers and options are reused |
+| `--ft_suffix` | `ft` | Suffix for saved fine-tuning arrays |
 | `--ft_dir` | `None` | Fine-tuning-array folder; defaults to `ft_sets/<reference_run>` |
 | `--synthetic_dataset` | `DATASET/synthetic_dataset.pkl` | Synthetic training dataset |
-| `--test_dataset` | `DATASET/test_data.pkl` | Held-out experimental dataset |
 | `--models` | `pls,mlp,cnn,rescnn` | Comma-separated subset of `pls`, `mlp`, `cnn`, `rescnn` |
 | `--gpus` | `0,1,2,3,4,5` | Comma-separated GPU indices |
 | `--reference_gpu_count` | `6` | GPU count represented by the stored POlyNet batch sizes; must be positive |
@@ -294,7 +292,7 @@ Outputs are written to `OUTPUT/attention_analysis/<model_name>/plots<suffix>/` u
 | `--output_dir` | `OUTPUT/baseline_comparison` | Baseline output root |
 | `--force_retrain` | off | Retrain existing baseline artifacts when present |
 
-This script trains and selects the PLS, MLP, CNN and ResCNN baselines, then evaluates them alongside POlyNet. Outputs are written to `OUTPUT/baseline_comparison/seed_<seed>/`.
+This training/model-selection stage trains and selects the PLS, MLP, 1D-CNN and ResCNN baselines using synthetic and pseudo-synthetic train/validation data. Outputs are written to `OUTPUT/baseline_comparison/seed_<seed>/`.
 
 ### `9_baselineAnalysis.py`
 
@@ -320,7 +318,7 @@ Run this post-hoc analysis after `8_baselineComparison.py`. It computes the fina
 | `OUTPUT/domain_gap/` | UMAP domain-gap plots |
 | `OUTPUT/peak_shift/` | Peak-shift plots and reference-peak JSON |
 | `OUTPUT/attention_analysis/` | Attention and Integrated Gradients analyses |
-| `OUTPUT/baseline_comparison/` | Baseline checkpoints, metrics and final comparative analyses |
+| `OUTPUT/baseline_comparison/` | Baseline checkpoints, histories and protocol metadata; final comparative analyses under `analysis/` |
 
 ## Citation
 

@@ -644,7 +644,7 @@ def main() -> None:
         title = mixture_name(family)
         mixture_counts[title] = n
         if n == 0:
-            print(f"[WARNING] No held-out samples for {title}; skipping.")
+            print(f"[WARNING] No experimental samples for {title}; skipping.")
             continue
         plot_mixture_series(
             bench, family, predictions, y_w_true, y_c_true_norm,

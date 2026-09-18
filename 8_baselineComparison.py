@@ -890,7 +890,6 @@ def main() -> None:
         "batch_protocol": batch_protocol,
         "pls_component_grid": list(PLS_COMPONENT_GRID),
         "pls_synthetic_samples": args.pls_synthetic_samples,
-        "experimental_dataset_used_for_training_or_selection": False,
     }
     save_json(output_dir / "protocol.json", protocol)
 

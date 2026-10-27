@@ -28,6 +28,7 @@ from sklearn.metrics import (
 )
 
 from utils import MappingNames
+from composition_eligibility import composition_mask, label_availability, parity_limits, relative_bounds
 
 LABELS = ["LDPE", "PE", "PP", "EH", "EO", "EB", "RACO", "EPR"]
 HOMOPOLYMER_LIKE = {"LDPE", "PE", "PP"}
@@ -445,6 +446,7 @@ def plot_channel_series_grid(
     suptitle=None,
     title_metric_name="AvgMAE",
     use_display_label=True,
+    composition_eligible=None,
 ):
     """Plot per-channel ordered true/predicted series in a grid."""
     label_to_index = {label: idx for idx, label in enumerate(labels)}
@@ -467,7 +469,9 @@ def plot_channel_series_grid(
         if valid_mask_mode == "weight":
             valid_idxs = np.where(y_true_copo > 0)[0]
         elif valid_mask_mode == "composition":
-            valid_idxs = np.where(y_true_copo >= 0)[0]
+            if composition_eligible is None:
+                raise ValueError('Composition plots require original physical-label eligibility')
+            valid_idxs = np.flatnonzero(composition_eligible[:, pos])
         else:
             raise ValueError(f"Unknown valid_mask_mode: {valid_mask_mode}")
 
@@ -497,7 +501,7 @@ def plot_channel_series_grid(
             f"{title_label} - {title_metric_name}: {avg_error:.2f}",
             fontsize=16,
         )
-        ax.set_ylim(-0.1, 1.1)
+        ax.set_ylim(*(parity_limits(y_true_copo,y_pred_copo) if valid_mask_mode=='composition' else (-.1,1.1)))
         ax.legend(fontsize=12)
         ax.set_xlabel("Experiment", fontsize=14)
         ax.set_ylabel(ylabel, fontsize=14)
@@ -730,6 +734,7 @@ def write_supervised_split_report(
     weight_threshold=5e-2,
     secondary_threshold=1e-2,
     detail_top_k=25,
+    composition_available=None,
 ):
     """Write aggregate, per-copolymer, and per-sample metrics for a supervised split."""
     f_out.write(f"\n{'=' * 90}\n")
@@ -747,7 +752,12 @@ def write_supervised_split_report(
 
     present_w = y_w_true_arr > 0
     absent_w = ~present_w
-    present_c = y_c_true_norm_arr >= 0
+    if y_c_true_denorm_arr is None:
+        raise ValueError('Physical composition targets are required for supervised metrics')
+    present_c = composition_mask(y_w_true_arr, y_c_true_denorm_arr,
+        y_c_true_norm_arr, y_c_pred_norm_arr,
+        np.isfinite(y_c_true_denorm_arr) if composition_available is None else composition_available,
+        copolymer=np.array([label not in HOMOPOLYMER_LIKE for label in labels]))
 
     w_abs_err = np.abs(y_w_true_arr - y_w_pred_arr)
     c_abs_err_norm = np.abs(y_c_true_norm_arr - y_c_pred_norm_arr)
@@ -885,7 +895,7 @@ def write_supervised_split_report(
 
         present_w_j = w_true_j > 0
         absent_w_j = ~present_w_j
-        present_c_j = c_true_j >= 0
+        present_c_j = present_c[:, j]
         pred_present_j = w_pred_j >= weight_threshold
 
         c_mae_denorm = np.nan
@@ -1269,6 +1279,7 @@ if __name__ == "__main__":
             "composition_val.png",
             plot_dir,
             valid_mask_mode="composition",
+            composition_eligible=composition_mask(y_w_true_val, y_c_true_val_denorm, y_c_true_val_norm, y_c_pred_val, np.isfinite(y_c_true_val_denorm)),
             point_alpha=0.5,
             row_height=3.5,
             suptitle=None,
@@ -1306,6 +1317,9 @@ if __name__ == "__main__":
 
     y_c_true_test_norm = normalize_compositions(y_c_true_test, scaler)
     y_c_true_test_norm = np.where(y_w_true_test != 0, y_c_true_test_norm, -1)
+    composition_test_mask = composition_mask(y_w_true_test, y_c_true_test,
+        y_c_true_test_norm, y_c_pred_test, label_availability(test_data, labels),
+        copolymer=np.array([lab not in HOMOPOLYMER_LIKE for lab in labels]))
 
     y_c_pred_test_denorm = denormalize_compositions(y_c_pred_test, scaler)
 
@@ -1381,6 +1395,7 @@ if __name__ == "__main__":
         "composition_test.png",
         plot_dir,
         valid_mask_mode="composition",
+        composition_eligible=composition_test_mask,
         point_alpha=0.75,
         row_height=4,
         suptitle="Composition Analysis on Test Set",
@@ -1488,7 +1503,7 @@ if __name__ == "__main__":
         y_c_pred_test_copo = y_c_pred_test[:, pos]
         y_c_true_test_copo = y_c_true_test_norm[:, pos]
 
-        idxs = np.where(y_c_true_test_copo > 0)[0]
+        idxs = np.flatnonzero(composition_test_mask[:, pos])
         y_c_true_test_copo = y_c_true_test_copo[idxs]
         y_c_pred_test_copo = y_c_pred_test_copo[idxs]
 
@@ -1505,14 +1520,10 @@ if __name__ == "__main__":
             color="tab:orange",
         )
 
-        y5_lower = y_c_true_test_copo * 0.95
-        y5_upper = y_c_true_test_copo * 1.05
-        y10_lower = y_c_true_test_copo * 0.90
-        y10_upper = y_c_true_test_copo * 1.10
-        y15_lower = y_c_true_test_copo * 0.85
-        y15_upper = y_c_true_test_copo * 1.15
-        y20_lower = y_c_true_test_copo * 0.80
-        y20_upper = y_c_true_test_copo * 1.20
+        y5_lower, y5_upper = relative_bounds(y_c_true_test_copo, 5)
+        y10_lower, y10_upper = relative_bounds(y_c_true_test_copo, 10)
+        y15_lower, y15_upper = relative_bounds(y_c_true_test_copo, 15)
+        y20_lower, y20_upper = relative_bounds(y_c_true_test_copo, 20)
 
         sort_idx = np.argsort(y_c_true_test_copo)
         y_sorted = y_c_true_test_copo[sort_idx]
@@ -1614,8 +1625,7 @@ if __name__ == "__main__":
         y_sorted = np.sort(np.concatenate([y_true, y_pred]))
 
         for pct, alpha in zip([10, 20], [0.1, 0.05]):
-            lower = y_sorted * (1 - pct / 100)
-            upper = y_sorted * (1 + pct / 100)
+            lower, upper = relative_bounds(y_sorted, pct)
             g.ax_joint.fill_between(
                 y_sorted,
                 lower,
@@ -1647,8 +1657,9 @@ if __name__ == "__main__":
             orientation="horizontal",
         )
 
-        g.ax_joint.set_xlim(-0.1, 1.1)
-        g.ax_joint.set_ylim(-0.1, 1.1)
+        limits = parity_limits(y_true, y_pred)
+        g.ax_joint.set_xlim(*limits)
+        g.ax_joint.set_ylim(*limits)
         g.ax_joint.set_xlabel("True Composition", fontsize=14)
         g.ax_joint.set_ylabel("Predicted Composition", fontsize=14)
         g.ax_joint.legend(loc="upper left", fontsize=10)
@@ -1677,7 +1688,7 @@ if __name__ == "__main__":
 
         mask_mix = y_w_true_test[:, pos] < 1.0
 
-        idxs = np.where(y_true > 0)[0]
+        idxs = np.flatnonzero(composition_test_mask[:, pos])
         y_true = y_true[idxs]
         y_pred = y_pred[idxs]
         mask_mix = mask_mix[idxs]
@@ -2157,7 +2168,7 @@ if __name__ == "__main__":
         c_true_denorm_j = y_c_true_test[:, j]
         c_pred_denorm_j = y_c_pred_test_denorm[:, j]
 
-        present_c = c_true_norm_j >= 0
+        present_c = composition_test_mask[:, j]
 
         if label in HOMOPOLYMER_LIKE:
             c_mae_norm_present = np.nan

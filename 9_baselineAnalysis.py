@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 import joblib
+from composition_eligibility import composition_mask, label_availability, parity_limits
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -110,7 +111,7 @@ def sample_f1(y_w_true, y_w_pred, threshold) -> float:
     return float(f1)
 
 
-def canonical_metrics(bench, y_w_true, y_c_true_norm, y_w_pred, y_c_pred_norm) -> dict:
+def canonical_metrics(bench, y_w_true, y_c_true_norm, y_w_pred, y_c_pred_norm, *, physical_compositions, composition_available) -> dict:
     """Metrics on the normalized composition representation."""
     for name, values in {
         "y_w_true": y_w_true,
@@ -126,15 +127,14 @@ def canonical_metrics(bench, y_w_true, y_c_true_norm, y_w_pred, y_c_pred_norm) -
     precision, recall, f1, _ = precision_recall_fscore_support(
         true_presence.astype(int), pred_presence.astype(int), average="macro", zero_division=0
     )
-    composition_mask = (
-        (y_c_true_norm >= 0)
-        & np.isin(np.arange(y_w_true.shape[1])[None, :], [3, 4, 5, 6, 7])
-    )
-    if not np.any(composition_mask):
+    eligible = composition_mask(y_w_true, physical_compositions, y_c_true_norm,
+        y_c_pred_norm, composition_available,
+        copolymer=np.isin(np.arange(y_w_true.shape[1])[None, :], [3, 4, 5, 6, 7]))
+    if not np.any(eligible):
         raise AssertionError("No present copolymer composition entries available for metrics.")
-    composition_error = np.abs(y_c_true_norm - y_c_pred_norm)[composition_mask]
-    composition_true = y_c_true_norm[composition_mask]
-    composition_pred = y_c_pred_norm[composition_mask]
+    composition_error = np.abs(y_c_true_norm - y_c_pred_norm)[eligible]
+    composition_true = y_c_true_norm[eligible]
+    composition_pred = y_c_pred_norm[eligible]
 
     out = {
         "detection_macro_precision": float(precision),
@@ -237,7 +237,7 @@ def predict_neural(bench, model, X, composition_scaler):
     return y_w, y_c_norm, y_c_physical
 
 
-def class_metrics(bench, model_name, y_w_true, y_c_true_norm, y_w_pred, y_c_pred_norm):
+def class_metrics(bench, model_name, y_w_true, y_c_true_norm, y_w_pred, y_c_pred_norm, *, physical_compositions, composition_available):
     rows = []
     for j, label in enumerate(bench.LABELS):
         present = y_w_true[:, j] > 0
@@ -251,8 +251,8 @@ def class_metrics(bench, model_name, y_w_true, y_c_true_norm, y_w_pred, y_c_pred
             zero_division=0,
         )
 
-        # Normalized targets >= 0 are valid; absent targets are exactly -1.
-        present_composition = y_c_true_norm[:, j] >= 0
+        present_composition = composition_mask(y_w_true[:, j], physical_compositions[:, j],
+            y_c_true_norm[:, j], y_c_pred_norm[:, j], composition_available[:, j])
         comp_mae = np.nan
         if label in COPOLYMER_LABELS and np.any(present_composition):
             comp_mae = float(np.mean(np.abs(
@@ -373,14 +373,15 @@ def plot_class_weight_profiles(bench, predictions, y_w_true, path: Path) -> None
     plt.close(fig)
 
 
-def plot_class_composition_parity(bench, predictions, y_w_true, y_c_true_norm, path: Path) -> None:
+def plot_class_composition_parity(bench, predictions, y_w_true, y_c_true_norm, path: Path, *, physical_compositions, composition_available) -> None:
     """Comparative version of the existing POlyNet composition parity plots."""
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
     handles = labels = None
     for p, label in enumerate(bench.LABELS[3:]):
         j = bench.LABELS.index(label)
         ax = axes.ravel()[p]
-        mask = y_c_true_norm[:, j] >= 0
+        mask = composition_mask(y_w_true[:, j], physical_compositions[:, j],
+            y_c_true_norm[:, j], predictions["POlyNet"]["y_c_pred_norm"][:, j], composition_available[:, j])
         true = y_c_true_norm[mask, j]
         lo, hi = float(np.min(true)), float(np.max(true))
         pad = max((hi - lo) * 0.05, 0.05)
@@ -390,8 +391,13 @@ def plot_class_composition_parity(bench, predictions, y_w_true, y_c_true_norm, p
         ax.set_title(DISPLAY_NAMES[label])
         ax.set_xlabel("True normalized composition")
         ax.set_ylabel("Predicted normalized composition")
-        ax.set_xlim(lo - pad, hi + pad)
-        ax.set_ylim(lo - pad, hi + pad)
+        plotted=np.concatenate([predictions[m]["y_c_pred_norm"][mask,j] for m in MODEL_ORDER])
+        for model in MODEL_ORDER:
+            composition_mask(y_w_true[:,j],physical_compositions[:,j],y_c_true_norm[:,j],
+                predictions[model]["y_c_pred_norm"][:,j],composition_available[:,j])
+        limits=parity_limits(true,plotted)
+        ax.set_xlim(*limits)
+        ax.set_ylim(*limits)
         ax.grid(alpha=0.2)
         if handles is None:
             handles, labels = ax.get_legend_handles_labels()
@@ -497,6 +503,7 @@ def main() -> None:
     )
     if not (len(test_df) == len(X_test) == len(y_w_true) == len(y_c_true_norm)):
         raise AssertionError("Dataframe, spectra, and normalized targets must have identical row counts.")
+    composition_available = label_availability(test_df, bench.LABELS)
     cardinality = (y_w_true > 0).sum(axis=1)
     print(
         "[INFO] Using the established POlyNet experimental evaluation set: "
@@ -594,6 +601,7 @@ def main() -> None:
             **canonical_metrics(
                 bench, y_w_true, y_c_true_norm,
                 predictions[name]["y_w"], predictions[name]["y_c_pred_norm"],
+                physical_compositions=y_c_true_physical, composition_available=composition_available,
             ),
         })
     overall_df = pd.DataFrame(rows)
@@ -611,6 +619,7 @@ def main() -> None:
                 **canonical_metrics(
                     bench, y_w_true[mask], y_c_true_norm[mask],
                     predictions[name]["y_w"][mask], predictions[name]["y_c_pred_norm"][mask],
+                    physical_compositions=y_c_true_physical[mask], composition_available=composition_available[mask],
                 ),
             })
     pure_mix_df = pd.DataFrame(rows)
@@ -623,6 +632,7 @@ def main() -> None:
         rows.extend(class_metrics(
             bench, name, y_w_true, y_c_true_norm,
             predictions[name]["y_w"], predictions[name]["y_c_pred_norm"],
+                physical_compositions=y_c_true_physical, composition_available=composition_available,
         ))
     class_df = pd.DataFrame(rows)
     class_df.to_csv(output_dir / "class_resolved_metrics.csv", index=False)
@@ -633,6 +643,7 @@ def main() -> None:
     plot_class_composition_parity(
         bench, predictions, y_w_true, y_c_true_norm,
         figure_dir / "class_composition_parity.png",
+        physical_compositions=y_c_true_physical, composition_available=composition_available,
     )
 
     # Pre-specified mixture series -------------------------------------------
@@ -658,6 +669,7 @@ def main() -> None:
                 **canonical_metrics(
                     bench, y_w_true[mask], y_c_true_norm[mask],
                     predictions[name]["y_w"][mask], predictions[name]["y_c_pred_norm"][mask],
+                    physical_compositions=y_c_true_physical[mask], composition_available=composition_available[mask],
                 ),
             })
     pd.DataFrame(rows).to_csv(output_dir / "mixture_series_metrics.csv", index=False)

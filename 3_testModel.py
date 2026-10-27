@@ -236,6 +236,27 @@ def ordered_combinations_by_cardinality(labels, max_components):
     return ordered_combinations
 
 
+def classwise_balanced_accuracy(cm):
+    """Binary one-vs-rest balanced accuracy for each row of the FULL matrix.
+
+    Rows are actual classes and columns predicted classes. Prediction-only
+    classes must remain in cm when counting negatives. A missing positive or
+    negative denominator makes balanced accuracy undefined (NaN); the report
+    excludes zero-support classes. This is not global multiclass balanced accuracy.
+    """
+    cm = np.asarray(cm, dtype=float)
+    if cm.ndim != 2 or cm.shape[0] != cm.shape[1] or not np.isfinite(cm).all() or np.any(cm < 0):
+        raise ValueError("Expected a square, finite, nonnegative confusion matrix")
+    tp = np.diag(cm)
+    support = cm.sum(axis=1)
+    fp = cm.sum(axis=0) - tp
+    negative_support = cm.sum() - support
+    tn = negative_support - fp
+    sensitivity = np.divide(tp, support, out=np.full_like(tp, np.nan), where=support > 0)
+    specificity = np.divide(tn, negative_support, out=np.full_like(tp, np.nan), where=negative_support > 0)
+    return (sensitivity + specificity) / 2
+
+
 def confusion_from_combinations(
     true_combinations,
     pred_combinations,
@@ -1315,11 +1336,7 @@ if __name__ == "__main__":
         zero_division=0,
     )
 
-    cm_diag = np.diag(cm_test)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        accuracy = np.divide(cm_diag, cm_test.sum(axis=1))
-        accuracy[np.isnan(accuracy)] = 0.0
+    balanced_accuracy = classwise_balanced_accuracy(cm_test)
 
     df_report = pd.DataFrame(
         {
@@ -1327,7 +1344,7 @@ if __name__ == "__main__":
             "Precision": precision,
             "Recall": recall,
             "F1-score": f1,
-            "Accuracy": accuracy,
+            "Balanced accuracy": balanced_accuracy,
             "Support": support,
         }
     )
@@ -1336,7 +1353,7 @@ if __name__ == "__main__":
 
     print(df_report_filtered)
 
-    metrics = ["Precision", "Recall", "F1-score", "Accuracy"]
+    metrics = ["Precision", "Recall", "F1-score", "Balanced accuracy"]
     plot_metric_radar(df_report_filtered, metrics, plot_dir, multi_plot=True)
 
     # %% TEST WEIGHT AND COMPOSITION ANALYSIS

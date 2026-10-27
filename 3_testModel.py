@@ -28,7 +28,7 @@ from sklearn.metrics import (
 )
 
 from utils import MappingNames
-from composition_eligibility import composition_mask, label_availability, parity_limits, relative_bounds
+from utils.composition_eligibility import composition_mask, label_availability, parity_limits, relative_bounds
 
 LABELS = ["LDPE", "PE", "PP", "EH", "EO", "EB", "RACO", "EPR"]
 HOMOPOLYMER_LIKE = {"LDPE", "PE", "PP"}

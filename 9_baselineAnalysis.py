@@ -22,16 +22,16 @@ import json
 import os
 from pathlib import Path
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import joblib
-from composition_eligibility import composition_mask, label_availability, parity_limits
+from utils.composition_eligibility import composition_mask, label_availability, parity_limits
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support, r2_score
 
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 MODEL_ORDER = ["PLS", "MLP", "CNN", "ResCNN", "POlyNet"]
 DISPLAY_NAMES = {

@@ -217,7 +217,7 @@ python 5_peakShiftAnalysis.py --help
 | `--dataset_size` | `25000` | Generic CLI default; the manuscript configuration used 20,000 |
 | `--n_max_components` | `2` | Maximum components in generated mixtures |
 | `--masking` | `0` | Random masking: `0` or `1` |
-| `--proportion_weights` | `0.4, 0.6` | Fractions for single- and multi-component examples |
+| `--proportion_weights` | `0.6, 0.4` | Fractions for single- and multi-component examples |
 | `--batch_size` | `64` | Batch size per GPU |
 | `--epochs` | `2500` | Maximum fine-tuning epochs |
 | `--model_name` | `model_weights_kl_mse_loss_composition_neg2_mse_hybrid` | Pretrained model folder |

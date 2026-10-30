@@ -68,7 +68,7 @@ conda activate polynet-env
 
 The data are distributed as a single ZIP archive on Zenodo.
 
-Zenodo archive URL: [\[10.5281/zenodo.23802659\](https://zenodo.org/records/23802659)](https://doi.org/10.5281/zenodo.23802659)
+Zenodo archive URL: https://doi.org/10.5281/zenodo.23802659
 
 After extracting the archive, copy its contents to the repository destinations below. Paths in the first column are relative to the archive's data folder.
 

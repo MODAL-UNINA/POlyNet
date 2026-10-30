@@ -156,7 +156,7 @@ python 6_attentionAnalysis.py \
 
 # 8. Train and select the baseline models using the canonical POlyNet run.
 python 8_baselineComparison.py \
-  --reference_run polynet_run_example \
+  --reference_run polynet_example \
   --ft_suffix ft \
   --synthetic_dataset DATASET/synthetic_dataset.pkl \
   --output_dir OUTPUT/baseline_comparison

@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--proportion_weights",
         type=str,
-        default="0.4, 0.6",
+        default="0.6, 0.4",
         help=(
             "Sampling proportions for single and mixture examples. "
             "The first value is the single-spectrum fraction; the remaining "
